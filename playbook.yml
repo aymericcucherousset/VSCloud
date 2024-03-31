@@ -1,0 +1,245 @@
+---
+- name: Install Symfony development environment
+  hosts: all
+  become: true
+  vars:
+    docker_arch: amd64
+  vars_prompt:
+    - name: git_user
+      prompt: What is your Git username
+      private: false
+    - name: git_email
+      prompt: What is your Git email
+      private: false
+
+  tasks:
+    - name: Fail if not an x86_64 architecture
+      ansible.builtin.fail:
+        msg: "This playbook is intended only for x86_64 (amd64) architectures."
+      when: ansible_architecture != "x86_64"
+
+    - name: Update and upgrade all packages to the latest version
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: dist
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        pkg:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - software-properties-common
+          - git
+          - build-essential
+          - zip
+          - lsb-release
+          - uidmap
+          - zsh
+
+    - name: Add non-privileged user
+      ansible.builtin.user:
+        name: dev
+        state: present
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Create directory for Docker's GPG key
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Add Docker's official GPG key
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        keyring: /etc/apt/keyrings/docker.gpg
+        state: present
+
+    - name: Print architecture variables
+      ansible.builtin.debug:
+        msg: "Architecture: {{ ansible_architecture }}, Codename: {{ ansible_lsb.codename }}"
+
+    - name: Add Docker repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ docker_arch }}
+          signed-by=/etc/apt/keyrings/docker.gpg]
+          https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable
+        filename: docker
+        state: present
+
+    - name: Install Docker and related packages
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: true
+      loop:
+        - docker-ce
+        - docker-ce-cli
+        - containerd.io
+        - docker-buildx-plugin
+        - docker-compose-plugin
+
+    - name: Add Docker group
+      ansible.builtin.group:
+        name: docker
+        state: present
+
+    - name: Add user to Docker group
+      ansible.builtin.user:
+        name: "dev"
+        groups: docker
+        append: true
+
+    - name: Enable and start Docker services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - docker.service
+        - containerd.service
+
+    - name: Installer Git
+      ansible.builtin.apt:
+        name: git
+        state: present
+
+    - name: Install PHP 8.3 repository
+      ansible.builtin.apt_repository:
+        repo: ppa:ondrej/php
+        state: present
+
+    - name: Install PHP 8.3
+      ansible.builtin.apt:
+        name: php8.3
+        state: present
+
+    - name: Install PHP 8.3 extentions (for Symfony)
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - php8.3-xml
+        - php8.3-mbstring
+        - php8.3-intl
+        - php8.3-mysql
+        - php8.3-curl
+        - php8.3-redis
+        - php8.3-zip
+        - php8.3-gd
+        - php8.3-bcmath
+        - php8.3-imagick
+        - php8.3-xdebug
+        - php8.3-ldap
+        - php8.3-amqp
+
+    - name: Setup Symfony CLI
+      ansible.builtin.shell: curl -1sLf 'https://dl.cloudsmith.io/public/symfony/stable/setup.deb.sh' | sudo -E bash
+      args:
+        creates: /usr/local/bin/symfony
+
+    - name: Install Symfony CLI
+      ansible.builtin.apt:
+        name: symfony-cli
+        state: present
+
+    - name: Install Composer
+      ansible.builtin.shell: curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+      args:
+        creates: /usr/local/bin/composer
+
+    - name: Add NodeSource repository
+      ansible.builtin.shell: curl -sL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+    
+    - name: Install Node.js
+      apt:
+        name: nodejs
+        state: present
+
+    - name: Configuration de Git
+      ansible.builtin.shell: |
+        git config --global user.name "{{ git_user }}"
+        git config --global user.email ""
+
+    - name: Create SSH directory
+      ansible.builtin.file:
+        path: /home/dev/.ssh
+        state: directory
+        owner: dev
+        group: dev
+        mode: '0700'
+
+    - name: Copy SSH public key to non-privileged user
+      ansible.builtin.copy:
+        src: ~/.ssh/id_ed25519.pub
+        dest: /home/dev/.ssh/authorized_keys
+        owner: dev
+        group: dev
+        mode: '0600'
+
+    - name: By default, deny all incoming connections
+      ansible.builtin.shell: ufw default deny incoming
+
+    - name: By default, allow all outgoing connections
+      ansible.builtin.shell: ufw default allow outgoing
+
+    - name: Allow SSH anywhere
+      ansible.builtin.shell: ufw allow OpenSSH
+      
+    - name: Enable UFW
+      ansible.builtin.shell: ufw --force enable
+    
+    - name: Install Fail2ban
+      apt:
+        name: "{{ item }}"
+        state: latest
+      with_items:
+        - fail2ban
+        - sendmail
+
+    - name: Override the basic fail2ban configuration with .local file
+      copy:
+        src: jail.local
+        dest: /etc/fail2ban/jail.local
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Replace the user email in jail
+      ansible.builtin.shell: sed -i 's\your-email@test.com\{{ git_email }}\g' /etc/fail2ban/jail.local
+
+    - name: Install Oh My Zsh
+      ansible.builtin.git:
+        repo: https://github.com/ohmyzsh/ohmyzsh.git
+        dest: /home/dev/.oh-my-zsh
+        depth: 1
+
+    - name: Run Oh My Zsh installation script
+      command: sudo -c "sh /tmp/install_ohmyzsh.sh --unattended" dev
+      register: ohmyzsh_result
+      remote_user: "dev"
+      failed_when: "'FAILED' in ohmyzsh_result.stderr"
+
+    - name: Copy Zsh config
+      ansible.builtin.copy:
+        src: .zshrc
+        dest: /home/dev/.zshrc
+        owner: dev
+        group: dev
+        mode: '0644'
+
+    - name: Change user shell to zsh 
+      become: true
+      user:
+        name: "dev"
+        shell: /bin/zsh
+
+    # - name: Add user to sudoers
+    #   ansible.builtin.copy:
+    #     content: "dev ALL=(ALL) NOPASSWD: ALL"
+    #     dest: /etc/sudoers.d/dev
+    #     mode: '0440'
